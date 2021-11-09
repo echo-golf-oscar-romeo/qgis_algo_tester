@@ -16,7 +16,8 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterString,
                        QgsVectorLayer,
                        QgsProject,
-                       QgsProcessingUtils
+                       QgsProcessingUtils,
+                       QgsVectorDataProvider,
                        )
 from qgis import processing
 from qgis.processing import alg
@@ -29,6 +30,7 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
     FIELD = 'FIELD'
     OUTPUT = 'OUTPUT'
     OUTPUT_MERGED = 'OUTPUT_MERGED'
+    VALUE = 'VALUE'
 
     def __init__(self):
         super().__init__()
@@ -51,7 +53,7 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
         return type(self)()
     
     def shortHelpString(self, config=None):
-        return "This algorithm splits line into several parts dividing it by points from point layer. \n It is rather rough, so there are several limitations. \n 0. if you want to split line, add points in the beginning and end of it \n 1. Your input point layer should have a field representing an order by which points should be connected with lines \n 2. Yet to work properly algorithm requires saving all the lines to a folder (I strongly recommend to create a 'trash' folder beforehand) \n 3. Moreover, you have to save a merged splitted line layer into a file \n 4. Finally, for some reason it will not add a merged output file automatically. So do it manually please \n UI currently unavailable;) \n Once I will fix all the problems..."
+        return "This algorithm splits line into several parts dividing it by points from point layer. \n It is rather rough, so there are several limitations. \n 0. if you want to split line, add points in the beginning and end of it \n 1. Your input point layer should have a field representing an order by which points should be connected with lines \n 2. Yet to work properly algorithm requires saving all the lines to a folder (I strongly recommend to create a 'trash' folder beforehead) \n 3. Moreover, you have to save a merged splitted line layer into a file \n 4. Finally, for some reason it will not add a merged output file automatically. So do it manually please \n UI currently unavailable;) \n Once I will fix all the problems..."
 
     def initAlgorithm(self, config=None):
         
@@ -78,16 +80,26 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
             )
         )
         self.addParameter(
+            QgsProcessingParameterField(
+                self.VALUE,
+                'Value',
+                'A field from point_layer representing value',
+                parentLayerParameterName=self.INPUT_POINTS,
+                optional = True
+            )
+        )
+        self.addParameter(
             QgsProcessingParameterFolderDestination(
                 self.OUTPUT, 'Output layer (lines)'
             )
         )
+        '''
         self.addParameter(
             QgsProcessingParameterFeatureSink(
                 self.OUTPUT_MERGED, 'Output layer (merged lines)'
             )
         )
-        
+        '''
         
     def processAlgorithm(self, parameters, context, feedback):
         '''
@@ -101,6 +113,16 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
             self.FIELD,
             context
         )
+        
+        # gettin name of a field with values
+        
+        fValue = self.parameterAsString(
+            parameters,
+            self.VALUE,
+            context
+        )
+        
+        values = []
         
         # getting info from point layer
         
@@ -140,11 +162,13 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
             for f in source.getFeatures():
                 if f.attribute(fName) == i:
                     start = str(f.geometry().asPoint().x()) + ',' + str(f.geometry().asPoint().y())
+                    values.append(f.attribute(fValue))
                 else:
                     continue
             for f in source.getFeatures():
                 if f.attribute(fName) == i + 1:
                     end = str(f.geometry().asPoint().x()) + ',' + str(f.geometry().asPoint().y())
+                    values.append(f.attribute(fValue))
                 else:
                     continue
                     
@@ -161,7 +185,7 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
         # putting together directories of single line layers in one list
         
         source_files = []
-        for i in range(counter - 1):
+        for i in range(counter - 2):
             source_files.append('{0}/{1}_{2}.{3}'.format(directory, 'splitted_lines', str(i).strip(), 'gpkg'))
             
         #merging layers    
@@ -169,13 +193,41 @@ class SplitLinesByPoints(QgsProcessingAlgorithm):
         params = {
             'LAYERS': source_files,
             'CRS': 'ProjectCrs',
-            'OUTPUT': parameters[self.OUTPUT_MERGED]
+            'OUTPUT': '{0}\{1}.{2}'.format(directory, '1_merged', 'shp')
         }
-        merged_layers = processing.runAndLoadResults("native:mergevectorlayers", params)
+        merged_layers = processing.run("native:mergevectorlayers", params, context = context)
+        
+        merged_with = processing.run("qgis:addfieldtoattributestable", {
+            'INPUT': '{0}\{1}.{2}'.format(directory, '1_merged', 'shp'),
+            'FIELD_NAME': 'StartValue',
+            'FIELD_TYPE': 1,
+            'FIELD_PRECISION': 2,
+            'OUTPUT': '{0}\{1}.{2}'.format(directory, '2_merged', 'shp')
+            }
+        )
+        
+        merged_with = processing.run("qgis:addfieldtoattributestable", {
+            'INPUT': '{0}\{1}.{2}'.format(directory, '2_merged', 'shp'),
+            'FIELD_NAME': 'EndValue',
+            'FIELD_TYPE': 1,
+            'FIELD_PRECISION': 2,
+            'OUTPUT': '{0}\{1}.{2}'.format(directory, '3_merged', 'shp')
+            }
+        )
+        
+        
+        layer = QgsVectorLayer('{0}\{1}.{2}'.format(directory, '3_merged', 'shp'), 'merged', 'ogr')
+        caps = layer.dataProvider().capabilities()
+        for i in range(counter - 1):
+            if caps & QgsVectorDataProvider.ChangeAttributeValues:
+                attrs = {6: values[2 * i], 7: values[2 * i + 1]}
+                layer.dataProvider().changeAttributeValues({ i : attrs })
+            print('hello')
+        print(*values)
         
         # Trying to load merged layer... but it doesn't so I just comment it and you do it manually
         
-        #merged = QgsVectorLayer(merged_layers['OUTPUT'], "layer_name_you_like", "ogr")
-        #QgsProject.instance().addMapLayer(merged
+        # merged = QgsVectorLayer('{0}\{1}.{2}'.format(directory, '3_merged', 'shp'), "wtf_merged", "ogr")
+        # QgsProject.instance().addMapLayer(merged)
         
         return {self.OUTPUT: directory}
